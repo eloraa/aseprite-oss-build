@@ -5,6 +5,11 @@ on:
     tags:
       - 'v*'
   workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version number (e.g., 1.2.3)'
+        required: true
+        type: string
 
 jobs:
   build:
@@ -24,6 +29,9 @@ jobs:
         with:
           path: aseprite/build
           key: build-${{ matrix.os }}-${{ github.ref_name }}
+          restore-keys: |
+            build-${{ matrix.os }}-
+            build-
 
       - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
@@ -101,22 +109,40 @@ jobs:
             Write-Warning "⚠️ OpenSSL DLLs not found — continuing anyway. Download and install OpenSSL 1.1.1.2000 from https://community.chocolatey.org/packages/openssl/1.1.1.2000"
           }
 
+      - name: Set Version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "version=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
+          fi
+
       - name: Package Build
         shell: bash
         run: |
           cd aseprite/build
           if [[ "${{ runner.os }}" == "Windows" ]]; then
-            7z a ../aseprite-${{ github.ref_name }}-windows-full.zip .
-            7z a ../aseprite-${{ github.ref_name }}-windows-bin.zip ./bin
+            7z a ../aseprite-${{ steps.version.outputs.version }}-windows-full.zip .
+            7z a ../aseprite-${{ steps.version.outputs.version }}-windows-bin.zip ./bin
           elif [[ "${{ runner.os }}" == "Linux" ]]; then
-            tar -czf ../aseprite-${{ github.ref_name }}-linux.tar.gz .
+            tar -czf ../aseprite-${{ steps.version.outputs.version }}-linux.tar.gz .
           elif [[ "${{ runner.os }}" == "macOS" ]]; then
-            tar -czf ../aseprite-${{ github.ref_name }}-macos.tar.gz .
+            tar -czf ../aseprite-${{ steps.version.outputs.version }}-macos.tar.gz .
           fi
+
+      - name: Create Tag (Manual Trigger)
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git tag ${{ steps.version.outputs.version }}
+          git push origin ${{ steps.version.outputs.version }}
 
       - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.version }}
           files: |
             aseprite/*.zip
             aseprite/*.tar.gz
