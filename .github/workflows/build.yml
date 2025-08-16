@@ -1,4 +1,4 @@
-name: Build Aseprite Releases
+name: Build & Release Aseprite
 
 on:
   push:
@@ -8,142 +8,96 @@ on:
 
 jobs:
   build:
-    name: Build (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
-        os: [windows-latest, macos-latest, ubuntu-latest]
-
-    defaults:
-      run:
-        working-directory: aseprite
+        os: [windows-latest, ubuntu-latest, macos-latest]
 
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive
+          path: aseprite
+
+      - name: Cache build
+        uses: actions/cache@v4
+        with:
+          path: aseprite/build
+          key: build-${{ matrix.os }}-${{ github.ref_name }}
 
       - name: Install Dependencies (Linux)
         if: runner.os == 'Linux'
+        shell: bash
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y \
             libpixman-1-dev libfreetype6-dev libharfbuzz-dev zlib1g-dev \
             libx11-dev libxcursor-dev libxi-dev libgl1-mesa-dev libfontconfig1-dev
 
+      - name: Install Dependencies (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: brew install cmake ninja ccache pkg-config
+
       - name: Install OpenSSL (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
-        run: |
-          choco install openssl --version=1.1.1.2000 -y
+        shell: pwsh
+        run: choco install -y openssl --version=1.1.1.2000
 
-      - name: CCache Skia
-        uses: actions/cache@v4
-        id: cache-skia
-        with:
-          path: aseprite/skia
-          key: skia-${{ runner.os }}-${{ github.ref_name }}
+      - name: Install Ninja
+        uses: aseprite/get-ninja@main
 
-      - name: Install Skia
-        if: steps.cache-skia.outputs.cache-hit != 'true'
-        run: |
-          if [[ "${{ runner.os }}" == "Windows" ]] ; then
-            this_dir=$(cygpath "${{ github.workspace }}/aseprite")
-          else
-            this_dir="${{ github.workspace }}/aseprite"
-          fi
-          skia_url=$(source $this_dir/laf/misc/skia-url.sh | xargs)
-          skia_file=$(basename $skia_url)
-          curl -L -o "$skia_file" "$skia_url"
-          unzip -q "$skia_file" -d skia
-
-      - uses: aseprite/get-ninja@main
       - uses: ilammy/msvc-dev-cmd@v1
         if: runner.os == 'Windows'
 
-      - name: CCache build
-        uses: actions/cache@v4
-        id: cache-build
-        with:
-          path: aseprite/build
-          key: build-${{ runner.os }}-${{ github.ref_name }}
-
       - name: Configure CMake
-        if: steps.cache-build.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: aseprite
         run: |
-          if [[ "${{ runner.os }}" == "Windows" ]] ; then
-            export enable_ccache=off
-          else
-            export enable_ccache=on
-          fi
-
-          if [[ "${{ runner.os }}" == "macOS" ]] ; then
-            export skia_arch=arm64
-          else
-            export skia_arch=x64
-          fi
-
           cmake -S . -B build -G Ninja \
             -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-            -DCMAKE_OSX_DEPLOYMENT_TARGET=10.9 \
-            -DENABLE_TESTS=OFF \
-            -DENABLE_SCRIPTING=on \
-            -DENABLE_CCACHE=$enable_ccache \
             -DLAF_BACKEND=skia \
-            -DSKIA_DIR=$(realpath skia) \
-            -DSKIA_LIBRARY_DIR=$(realpath skia/out/Release-$skia_arch)
+            -DENABLE_SCRIPTING=on \
+            -DENABLE_TESTS=OFF
 
-      - name: Compile
-        if: steps.cache-build.outputs.cache-hit != 'true'
-        run: cmake --build build --config RelWithDebInfo
+      - name: Build
+        shell: bash
+        working-directory: aseprite
+        run: cmake --build build --config RelWithDebInfo --parallel
 
-      - name: Copy OpenSSL DLLs
+      - name: Copy OpenSSL DLLs (Windows)
         if: runner.os == 'Windows'
-        shell: powershell
+        shell: pwsh
         continue-on-error: true
         run: |
           $opensslBin = "C:\Program Files\OpenSSL\bin"
           try {
-            Copy-Item "$opensslBin\libcrypto-1_1-x64.dll" -Destination build/bin/ -ErrorAction Stop
-            Copy-Item "$opensslBin\libssl-1_1-x64.dll" -Destination build/bin/ -ErrorAction Stop
+            Copy-Item "$opensslBin\libcrypto-1_1-x64.dll" -Destination aseprite/build/bin/ -ErrorAction Stop
+            Copy-Item "$opensslBin\libssl-1_1-x64.dll" -Destination aseprite/build/bin/ -ErrorAction Stop
             Write-Host "✅ Copied OpenSSL DLLs"
           } catch {
             Write-Warning "⚠️ OpenSSL DLLs not found — continuing anyway. Download and install OpenSSL 1.1.1.2000 from https://community.chocolatey.org/packages/openssl/1.1.1.2000"
           }
 
-      - name: Zip full build
+      - name: Package Build
+        shell: bash
         run: |
-          cd build
-          7z a ../aseprite-${{ runner.os }}-full.zip .
+          cd aseprite/build
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            7z a ../aseprite-${{ github.ref_name }}-windows-full.zip .
+            7z a ../aseprite-${{ github.ref_name }}-windows-bin.zip ./bin
+          elif [[ "${{ runner.os }}" == "Linux" ]]; then
+            tar -czf ../aseprite-${{ github.ref_name }}-linux.tar.gz .
+          elif [[ "${{ runner.os }}" == "macOS" ]]; then
+            tar -czf ../aseprite-${{ github.ref_name }}-macos.tar.gz .
+          fi
 
-      - name: Zip bin only
-        run: |
-          cd build/bin
-          7z a ../../aseprite-${{ runner.os }}-bin.zip .
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: aseprite-${{ runner.os }}-full
-          path: aseprite-*-full.zip
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: aseprite-${{ runner.os }}-bin
-          path: aseprite-*-bin.zip
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: ./artifacts
-
-      - name: Create Release
+      - name: Upload Release Assets
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.ref_name }}
-          files: artifacts/**/*.zip
+          files: |
+            aseprite/*.zip
+            aseprite/*.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
